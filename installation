@@ -1,0 +1,383 @@
+ubuntu 20.04 LTS
+
+apt-get update
+apt-get upgrade
+
+reboot
+
+sudo su -
+
+
+
+Ставим MariaDB
+
+apt-get install software-properties-common
+timedatectl set-timezone Europe/Moscow
+apt-key adv --recv-keys --keyserver keyserver.ubuntu.com 0xF1656F24C74CD1D8
+add-apt-repository 'deb [arch=amd64] http://mariadb.mirror.liquidtelecom.com/repo/10.5/debian buster main'
+apt update
+apt install mariadb-server mariadb-client
+
+
+sudo mysql_secure_installation (unix-socket - нет)
+
+mysql -u root -p
+MariaDB [(none)]> SELECT VERSION();
++--------------------------------------+
+| VERSION()                            |
++--------------------------------------+
+| 10.5.4-MariaDB-1:10.5.4+maria~buster |
++--------------------------------------+
+1 row in set (0.000 sec)
+
+
+Делаем таблицы и индексы:
+
+CREATE DATABASE powerdns;
+GRANT ALL ON powerdns.* TO 'powerdns'@'localhost' 
+IDENTIFIED BY 'strongpassword';
+FLUSH PRIVILEGES;
+USE powerdns;
+
+
+CREATE TABLE domains (
+  id                    INT AUTO_INCREMENT,
+  name                  VARCHAR(255) NOT NULL,
+  master                VARCHAR(128) DEFAULT NULL,
+  last_check            INT DEFAULT NULL,
+  type                  VARCHAR(6) NOT NULL,
+  notified_serial       INT UNSIGNED DEFAULT NULL,
+  account               VARCHAR(40) CHARACTER SET 'utf8' DEFAULT NULL,
+  PRIMARY KEY (id)
+) Engine=InnoDB CHARACTER SET 'latin1';
+
+CREATE UNIQUE INDEX name_index ON domains(name);
+
+
+CREATE TABLE records (
+  id                    BIGINT AUTO_INCREMENT,
+  domain_id             INT DEFAULT NULL,
+  name                  VARCHAR(255) DEFAULT NULL,
+  type                  VARCHAR(10) DEFAULT NULL,
+  content               VARCHAR(64000) DEFAULT NULL,
+  ttl                   INT DEFAULT NULL,
+  prio                  INT DEFAULT NULL,
+  change_date           INT DEFAULT NULL,
+  disabled              TINYINT(1) DEFAULT 0,
+  ordername             VARCHAR(255) BINARY DEFAULT NULL,
+  auth                  TINYINT(1) DEFAULT 1,
+  PRIMARY KEY (id)
+) Engine=InnoDB CHARACTER SET 'latin1';
+
+CREATE INDEX nametype_index ON records(name,type);
+CREATE INDEX domain_id ON records(domain_id);
+CREATE INDEX ordername ON records (ordername);
+
+
+CREATE TABLE supermasters (
+  ip                    VARCHAR(64) NOT NULL,
+  nameserver            VARCHAR(255) NOT NULL,
+  account               VARCHAR(40) CHARACTER SET 'utf8' NOT NULL,
+  PRIMARY KEY (ip, nameserver)
+) Engine=InnoDB CHARACTER SET 'latin1';
+
+
+CREATE TABLE comments (
+  id                    INT AUTO_INCREMENT,
+  domain_id             INT NOT NULL,
+  name                  VARCHAR(255) NOT NULL,
+  type                  VARCHAR(10) NOT NULL,
+  modified_at           INT NOT NULL,
+  account               VARCHAR(40) CHARACTER SET 'utf8' DEFAULT NULL,
+  comment               TEXT CHARACTER SET 'utf8' NOT NULL,
+  PRIMARY KEY (id)
+) Engine=InnoDB CHARACTER SET 'latin1';
+
+CREATE INDEX comments_name_type_idx ON comments (name, type);
+CREATE INDEX comments_order_idx ON comments (domain_id, modified_at);
+
+
+CREATE TABLE domainmetadata (
+  id                    INT AUTO_INCREMENT,
+  domain_id             INT NOT NULL,
+  kind                  VARCHAR(32),
+  content               TEXT,
+  PRIMARY KEY (id)
+) Engine=InnoDB CHARACTER SET 'latin1';
+
+CREATE INDEX domainmetadata_idx ON domainmetadata (domain_id, kind);
+
+
+CREATE TABLE cryptokeys (
+  id                    INT AUTO_INCREMENT,
+  domain_id             INT NOT NULL,
+  flags                 INT NOT NULL,
+  active                BOOL,
+  content               TEXT,
+  PRIMARY KEY(id)
+) Engine=InnoDB CHARACTER SET 'latin1';
+
+CREATE INDEX domainidindex ON cryptokeys(domain_id);
+
+
+CREATE TABLE tsigkeys (
+  id                    INT AUTO_INCREMENT,
+  name                  VARCHAR(255),
+  algorithm             VARCHAR(50),
+  secret                VARCHAR(255),
+  PRIMARY KEY (id)
+) Engine=InnoDB CHARACTER SET 'latin1';
+
+CREATE UNIQUE INDEX namealgoindex ON tsigkeys(name, algorithm);
+
+
+Должно получиться:
+
+MariaDB [powerdns]> show tables;
++--------------------+
+| Tables_in_powerdns |
++--------------------+
+| comments           |
+| cryptokeys         |
+| domains            |
+| records            |
+| supermasters       |
+| tsigkeys           |
++--------------------+
+6 rows in set (0.000 sec)
+
+\q
+
+Убиваем убунтовский systemd-resolved
+
+systemctl disable systemd-resolved
+systemctl stop systemd-resolved
+
+Проверяем
+ls -lh /etc/resolv.conf 
+lrwxrwxrwx 1 root root 39 Jul 24 15:50 /etc/resolv.conf -> ../run/systemd/resolve/stub-resolv.conf
+Удаляем
+$ sudo rm /etc/resolv.conf
+
+Новый файл:
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+Ставим PDNS
+apt-get update 
+apt-get install pdns-server pdns-backend-mysql
+
+cp /usr/share/doc/pdns-backend-mysql/examples/pdns.local.gmysql.conf /etc/powerdns/pdns.d/pdns.local.gmysql.conf
+правим /etc/powerdns/pdns.d/pdns.local.gmysql.conf
+
+# MySQL Configuration
+# Launch gmysql backend
+launch+=gmysql
+# gmysql parameters
+gmysql-host=localhost
+gmysql-port=3306
+gmysql-dbname=powerdns
+gmysql-user=powerdns
+gmysql-password=strongpassword
+gmysql-dnssec=yes
+# gmysql-socket=
+
+
+systemctl restart pdns
+systemctl status pdns
+
+echo 'api=yes' >> /etc/powerdns/pdns.conf
+echo 'api-key=STRONG_PASSWORD' >> /etc/powerdns/pdns.conf
+echo 'webserver=yes' >> /etc/powerdns/pdns.conf
+echo 'webserver-address=0.0.0.0' >> /etc/powerdns/pdns.conf
+echo 'webserver-allow-from=0.0.0.0/0,::/0' >> /etc/powerdns/pdns.conf
+echo 'webserver-port=8081' >> /etc/powerdns/pdns.conf
+
+
+
+Ставим PowerdnsAdmin
+
+apt-get install python3-dev
+
+apt-get install -y libmysqlclient-dev python3-mysqldb libsasl2-dev libffi-dev libldap2-dev libssl-dev libxml2-dev libxslt1-dev libxmlsec1-dev pkg-config python3-virtualenv python3-pip virtualenv -y
+
+mysql -u root -p
+CREATE DATABASE pdnsadmin CHARACTER SET utf8 COLLATE utf8_general_ci;
+GRANT ALL PRIVILEGES ON pdnsadmin.* TO 'pdnsadminuser'@'%' IDENTIFIED BY '<SECRET_PASSWORD>';
+FLUSH PRIVILEGES;
+quit;
+
+ставим yarn
+
+curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
+echo "deb https://dl.yarnpkg.com/debian/ stable main" > /etc/apt/sources.list.d/yarn.list
+apt-get update 
+apt-get install  yarn
+
+Клонируем себе репу:
+git clone https://github.com/ngoduykhanh/PowerDNS-Admin.git /opt/web/powerdns-admin
+cd /opt/web/powerdns-admin
+pip3 install virtualenv
+virtualenv -p python3 flask
+. ./flask/bin/activate
+pip3 install -r requirements.txt
+pip3 install python-dotenv
+
+
+nano powerdnsadmin/default_config.py
+
+
+### DATABASE CONFIG
+SQLA_DB_USER = 'pdnsadminuser'
+SQLA_DB_PASSWORD = 'STRONG_PASSWORD'
+SQLA_DB_HOST = '127.0.0.1'
+SQLA_DB_NAME = 'pdnsadmin'
+SQLALCHEMY_TRACK_MODIFICATIONS = True
+
+
+#MySQL
+SQLALCHEMY_DATABASE_URI = 'mysql://'+SQLA_DB_USER+':'
++SQLA_DB_PASSWORD+'@'+SQLA_DB_HOST+'/'+SQLA_DB_NAME
+#SQLite
+#SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(basedir, 'pdns.db')
+
+
+cp powerdnsadmin/default_config.py powerdnsadmin/config.py
+
+export FLASK_APP=powerdnsadmin/__init__.py
+flask db upgrade
+flask db migrate -m "Init DB"
+yarn install --pure-lockfile
+flask assets build
+
+дальше пробуем запустить что собрали
+./run.py
+должно выдать в конце что-то вроде:
+[INFO]  * Debugger PIN: 104-611-896
+Выходим по CTRL+C
+
+создаем /etc/systemd/system/powerdns-admin.service
+
+[Unit]
+Description=PowerDNS-Admin
+After=network.target
+
+[Service]
+PIDFile=/run/powerdns-admin/pid
+User=root
+Group=root
+WorkingDirectory=/opt/web/powerdns-admin
+ExecStart=/opt/web/powerdns-admin/flask/bin/gunicorn --pid /run/powerdns-admin/pid --bind unix:/opt/web/powerdns-admin/powerdns-admin.sock 'powerdnsadmin:create_app()'
+PrivateTmp=true
+RuntimeDirectory=powerdns-admin
+
+[Install]
+WantedBy=multi-user.target
+
+
+проверяем
+systemctl daemon-reload
+systemctl start powerdns-admin
+systemctl status powerdns-admin
+systemctl enable powerdns-admin
+
+
+Ставим nginx
+apt install nginx -y
+
+
+nano /etc/nginx/conf.d/powerdns-admin.conf
+
+server {
+  listen *:80;
+  server_name               test.local;
+
+  index                     index.html index.htm index.php;
+  root                      /opt/web/powerdns-admin;
+  access_log                /var/log/nginx/powerdns-admin.local.access.log combined;
+  error_log                 /var/log/nginx/powerdns-admin.local.error.log;
+
+  client_max_body_size              10m;
+  client_body_buffer_size           128k;
+  proxy_redirect                    off;
+  proxy_connect_timeout             90;
+  proxy_send_timeout                90;
+  proxy_read_timeout                90;
+  proxy_buffers                     32 4k;
+  proxy_buffer_size                 8k;
+  proxy_set_header                  Host $host;
+  proxy_set_header                  X-Real-IP $remote_addr;
+  proxy_set_header                  X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_headers_hash_bucket_size    64;
+
+  location ~ ^/static/  {
+    include  /etc/nginx/mime.types;
+    root /opt/web/powerdns-admin/app;
+
+    location ~*  \.(jpg|jpeg|png|gif)$ {
+      expires 365d;
+    }
+
+    location ~* ^.+.(css|js)$ {
+      expires 7d;
+    }
+  }
+
+  location / {
+    proxy_pass            http://unix:/opt/web/powerdns-admin/powerdns-admin.sock;
+    proxy_read_timeout    120;
+    proxy_connect_timeout 120;
+    proxy_redirect        off;
+  }
+
+}
+
+
+
+rm /etc/nginx/sites-enabled/default
+
+дальше там слегка напутано в документации, надо поправить права и пути
+chown -R pdns:pdns /opt/web/powerdns-admin/powerdnsadmin/static/
+touch /var/log/pdns.log
+chown pdns:pdns  /var/log/pdns.log
+mkdir -p /opt/web/powerdns-admin/app/static/generated
+ln -s /opt/web/powerdns-admin/powerdnsadmin/static/generated /opt/web/powerdns-admin/app/static/generated
+nginx -t 
+systemctl restart nginx
+
+Теперь можно заходить по айпишнику на веб-морду и регить первого пользователя, там еще нужно прописать
+в Settings > PDNS путь к API
+http://127.0.0.1:8081/
+и пароль, который в pdns.conf
+
+Но сервер будет отвечать только за те зоны что есть на нем, а рекурсивные запросы
+отвергать напрочь. Поэтому нам надо поставить powerdns-recursor, чтобы он висел на 53-м порту и пересылал запросы например на 8.8.8.8,
+а сам сервер повесим на порт 5300 и будем туда пересылать запросы только для наших зон.
+
+echo 'local-port=5300' >> /etc/powerdns/pdns.conf
+systemctl restart pdns
+
+apt-get install -y pdns-recursor
+правим /etc/powerdns/recursor.conf
+
+allow-from=127.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 192.168.0.0/16, 172.16.0.0/12, ::1/128, fc00::/7, fe80::/10
+api-key=STRONG_PASSWORD
+
+
+forward-zones=test.site=127.0.0.1:5300, test.local=127.0.0.1:5300, 100.200.10.in-addr.arpa=127.0.0.1:5300
+выше я говорю, что к зонам test.site, test.local и 100.200.10.in-addr.arpa надо стучаться на 127.0.0.1 порт 5300
+
+local-port=53
+disable-packetcache=
+packetcache-ttl=0
+
+
+если сервер живет на медленной виртуалке, то можно изменить следующе параметры в БД
+use mysql;
+Set @@local.net_read_timeout = 20000;
+SET @@global.net_read_timeout=20000;
+SET SESSION MAX_EXECUTION_TIME=20000;
+SET GLOBAL MAX_EXECUTION_TIME=200000;
+SET session wait_timeout=30000;
+SET @@GLOBAL.wait_timeout=30000;
+\q
+systemctl restart mysql
