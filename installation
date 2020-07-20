@@ -371,6 +371,9 @@ disable-packetcache=
 packetcache-ttl=0
 
 
+systemctl restart powerdns-recursor
+теперь в /etc/resolv.conf можно прописать 127.0.0.1 и проверить как все работает
+
 если сервер живет на медленной виртуалке, то можно изменить следующе параметры в БД
 use mysql;
 Set @@local.net_read_timeout = 20000;
